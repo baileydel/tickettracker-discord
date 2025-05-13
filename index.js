@@ -93,7 +93,7 @@ async function recreateThread(message, user) {
 
     const threadName = originalThread.name || "Completed Thread";
 
-    let threadStarter = `## Thread Completed ✅
+    let threadStarter = `## ✅Task Completed: 
 **Original Thread:** ${threadName}
 **Marked complete by:** ${user.tag}
 **Completed at:** ${new Date().toLocaleString()}
@@ -106,17 +106,53 @@ async function recreateThread(message, user) {
 `;
     }
 
-    threadStarter += "\n--- Thread Contents Below ---";
+    const archiveEmbeds = new EmbedBuilder()
+      .setColor(0x00FF00)
+      .setTitle(`✅ Task Completed: ${threadName}`)
 
-    const newThread = await completionChannel.threads.create({
-      name: `✅ ${threadName}`,
-      message: {
+      .setDescription(
+        `A copy of this thread has been created in ${completionChannel.name} ().`
+    );
+
+    // Create a button with the thread IDs and message ID stored for reopening
+    const rows = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel('🔄 Original Issue Thread')
+        .setStyle(ButtonStyle.Link)
+        .setURL(`https://discord.com/channels/${message.guild.id}/${originalThread.id}`)
+    );
+
+    // IMPROVED THREAD CREATION: Create a message first, then start a thread from it
+    // This allows us to delete the message later if needed
+    const starterMessage = await completionChannel.send({
+        embeds: [archiveEmbeds],
         content: threadStarter,
-      },
-      autoArchiveDuration: 10080, // 1 week
+        components: [rows]
     });
 
-    console.log(`Created new thread: ${newThread.name} (${newThread.id})`);
+    // Store the starter message ID for later deletion
+    const starterMessageId = starterMessage.id;
+
+    // Now create the thread from this message
+    const newThread = await starterMessage.startThread({
+      name: `✅ ${threadName}`,
+      autoArchiveDuration: 10080 // 1 week
+    });
+
+    rows.addComponents(
+        new ButtonBuilder()
+        .setLabel('🔄 Reopen')
+        .setCustomId(`reopen_${newThread.id}_${starterMessageId}`)
+        .setStyle(ButtonStyle.Primary)
+    )
+  
+    await starterMessage.edit({
+        embeds: [archiveEmbeds],
+        content: threadStarter,
+        components: [rows]
+    });
+
+    console.log(`Created new thread: ${newThread.name} (${newThread.id}) with parent message: ${starterMessageId}`);
 
     const originalMessages = await originalThread.messages.fetch({ limit: 100 });
     const sortedMessages = Array.from(originalMessages.values())
@@ -148,52 +184,53 @@ async function recreateThread(message, user) {
           await newThread.send(chunk);
         }
       } else {
+
+
         await newThread.send(messageContent);
       }
     }
 
     await newThread.send('--- End of Thread Content ---');
 
-    // Mark the original message with a special reaction to show it was processed
-    await message.react('📋');
 
     const archiveEmbed = new EmbedBuilder()
-    .setColor(0x00FF00)
-    .setTitle('✅ Thread Archived')
-    .setDescription(
-      `A copy of this thread has been created ${newThread.id}).`
+      .setColor(0x00FF00)
+      .setTitle('✅ Thread Archived')
+      .setDescription(
+        `A copy of this thread has been created in ${completionChannel.name} (${newThread.id}).`
+      );
+
+    // Create a button with the thread IDs and message ID stored for reopening
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel('🔄 Reopen')
+        .setCustomId(`reopen_${newThread.id}_${starterMessageId}`)
+        .setStyle(ButtonStyle.Primary)
     );
+      
 
+    // Post a summary message in the completed-tasks channel
+    const summaryMessageId = await postCompletionSummary(message, user, originalThread, newThread, completionChannel, starterMessageId);
 
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setLabel('🔄 Reopen')
-      .setCustomId(`reopen_${completionThread.id}_${completionMsg.id}`)
-      .setStyle(ButtonStyle.Primary)
-  );
-    // send embed + buttons
-    const sentMessage = await originalThread.send({
-      embeds: [archiveEmbed],
-      components: [row],
-    });
-
-    // NEW: Post a summary message in the completed-tasks channel
-    await postCompletionSummary(message, user, originalThread, newThread, completionChannel);
-
-    return newThread;
+    return { 
+      thread: newThread, 
+      starterMessageId: starterMessageId,
+      summaryMessageId: summaryMessageId
+    };
 
   } catch (error) {
     console.error('Error recreating thread:', error);
+    return null;
   }
 }
 
-// NEW FUNCTION: Post a summary of the completed task in the completed-tasks channel
-async function postCompletionSummary(message, user, originalThread, newThread, completionChannel) {
+// Post a summary of the completed task in the completed-tasks channel
+async function postCompletionSummary(message, user, originalThread, newThread, completionChannel, starterMessageId) {
   try {
     const targetChannel = completionChannel;
     if (!targetChannel) {
       console.error('Could not find target channel for summary message');
-      return;
+      return null;
     }
 
     const memberCount = originalThread.memberCount || 'Unknown';
@@ -235,6 +272,8 @@ async function postCompletionSummary(message, user, originalThread, newThread, c
       }
     }
 
+
+
     const summaryEmbed = {
       color: 0x00FF00,
       title: `✅ Task Completed: ${originalThread.name}`,
@@ -255,11 +294,20 @@ async function postCompletionSummary(message, user, originalThread, newThread, c
       }
     };
 
-    await targetChannel.send({ embeds: [summaryEmbed] });
-    console.log(`Posted completion summary in channel: ${targetChannel.id}`);
+    // Store the original thread ID and thread name in the embed for easier lookup when reopening
+    summaryEmbed.fields.push({
+      name: "Thread Info",
+      value: `Thread ID: ${originalThread.id}\nStarter Message ID: ${starterMessageId}`
+    });
+
+    const summaryMessage = await targetChannel.send({ embeds: [summaryEmbed] });
+    console.log(`Posted completion summary in channel: ${targetChannel.id}, message ID: ${summaryMessage.id}`);
+    
+    return summaryMessage.id;
 
   } catch (error) {
     console.error('Error posting completion summary:', error);
+    return null;
   }
 }
 
@@ -364,6 +412,7 @@ function splitTextIntoChunks(text, maxLength) {
   return chunks;
 }
 
+// COMPLETELY REWRITTEN REACTION HANDLER
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
 
@@ -411,47 +460,150 @@ client.on('messageReactionAdd', async (reaction, user) => {
       }
 
       await recreateThread(reaction.message, user);
+
+      reaction.message.delete().catch(error => {
+        console.error('Failed to delete original message:', error);
+      });
+
     }
   } catch (error) {
     console.error('Error processing reaction:', error);
   }
 });
 
+// COMPLETELY REWRITTEN INTERACTION HANDLER
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
 
-  // only handle our reopen_* buttons
+  // Only handle our reopen_* buttons
   if (!interaction.customId.startsWith('reopen_')) return;
 
-  // parse out the two IDs
-  // format is: reopen_<completionThreadId>_<completionMsgId>
-  const [, completionThreadId, completionMsgId] = interaction.customId.split('_');
+  try {
+    // Acknowledge the interaction immediately
+    await interaction.deferReply({ ephemeral: true });
 
-  // 1️⃣ delete the embed in the original thread
-  await interaction.message.delete();
+    // Parse out the IDs - format is: reopen_<archiveThreadId>_<starterMessageId>
+    const [, archiveThreadId, starterMessageId] = interaction.customId.split('_');
+    
+    console.log(`Processing reopen for archive thread: ${archiveThreadId}, starter message: ${starterMessageId}`);
 
-  // 2️⃣ fetch & delete the embed in completed-tasks
-  const completionThread = await interaction.guild.channels.fetch(completionThreadId);
-  if (completionThread && completionThread.isThread()) {
-    // delete the embed message
-    await completionThread.messages.delete(completionMsgId).catch(() => null);
-    // delete the thread itself
-    await completionThread.delete('Reopening original thread').catch(() => null);
+    // 1️⃣ Delete the button message in the original thread
+    await interaction.message.delete().catch(error => {
+      console.error('Failed to delete button message:', error);
+    });
+
+    // 2️⃣ Get the completion channel
+    let completionChannel;
+    try {
+      if (isNaN(COMPLETION_CHANNEL_ID)) {
+        completionChannel = interaction.guild.channels.cache.find(
+          channel => channel.name === COMPLETION_CHANNEL_ID && channel.type === 0
+        );
+      } else {
+        completionChannel = await interaction.guild.channels.fetch(COMPLETION_CHANNEL_ID);
+      }
+    } catch (err) {
+      console.error('Failed to get completion channel:', err);
+    }
+
+    // 3️⃣ Find and delete all related messages in the completion channel
+    if (completionChannel) {
+      try {
+        // First, try to find the summary message by task ID in the footer
+        const recentMessages = await completionChannel.messages.fetch({ limit: 50 });
+        
+        // Find summary embed messages
+        for (const [id, msg] of recentMessages.entries()) {
+          // Look for messages with embeds that might be our summary
+          if (msg.embeds && msg.embeds.length > 0) {
+            for (const embed of msg.embeds) {
+              // Check if this embed mentions our thread ID
+              if (embed.footer && embed.footer.text && embed.footer.text.includes(interaction.channel.id.slice(-6))) {
+                console.log(`Found and deleting summary message: ${msg.id}`);
+                await msg.delete().catch(err => console.error('Error deleting summary message:', err));
+                break;
+              }
+              
+              // Also check in the fields for our thread ID
+              if (embed.fields) {
+                for (const field of embed.fields) {
+                  if (field.value && (field.value.includes(interaction.channel.id) || 
+                                     field.value.includes(archiveThreadId))) {
+                    console.log(`Found and deleting summary message by field match: ${msg.id}`);
+                    await msg.delete().catch(err => console.error('Error deleting summary message:', err));
+                    break;
+                  }
+                }
+              }
+            }
+          }
+          
+          // Also look for direct messages containing our thread ID in the text
+          if (msg.content && msg.content.includes(interaction.channel.id)) {
+            console.log(`Found and deleting related message by content: ${msg.id}`);
+            await msg.delete().catch(err => console.error('Error deleting related message:', err));
+          }
+        }
+        
+        // Try to delete the starter message directly
+        if (starterMessageId) {
+          try {
+            await completionChannel.messages.delete(starterMessageId);
+            console.log(`Deleted starter message: ${starterMessageId}`);
+          } catch (err) {
+            console.log(`Could not delete starter message: ${starterMessageId}`);
+          }
+        }
+        
+        // Additional check for "Thread Completed" messages without embeds
+        const threadCompletedMessages = recentMessages.filter(msg => 
+          msg.content && 
+          msg.content.includes("Thread Completed") && 
+          msg.content.includes(interaction.channel.name)
+        );
+        
+        for (const [id, msg] of threadCompletedMessages) {
+          console.log(`Found and deleting thread completed message: ${msg.id}`);
+          await msg.delete().catch(err => console.error('Error deleting thread completed message:', err));
+        }
+      } catch (err) {
+        console.error('Error cleaning up completion channel messages:', err);
+      }
+    }
+
+    // 4️⃣ Handle the archived thread cleanup
+    try {
+      // Get the archived thread
+      const archiveThread = await interaction.guild.channels.fetch(archiveThreadId).catch(() => null);
+      
+      if (archiveThread && archiveThread.isThread()) {
+        // Delete the thread
+        await archiveThread.delete('Thread reopened by user');
+        console.log(`Deleted archive thread: ${archiveThreadId}`);
+      } else {
+        console.log(`Could not find archive thread: ${archiveThreadId}`);
+      }
+    } 
+    catch (err) {
+      console.error('Error deleting archive thread:', err);
+    }
+
+
+    // 7️⃣ Provide feedback to the user
+    await interaction.editReply({
+      content: 'Thread reopened and all archive messages have been removed.',
+      ephemeral: true
+    });
+    
+  } catch (error) {
+    console.error('Error handling reopen button:', error);
+    if (interaction.deferred) {
+      await interaction.editReply({
+        content: 'An error occurred while reopening the thread.',
+        ephemeral: true
+      }).catch(() => null);
+    }
   }
-
-  // 3️⃣ reopen the original thread
-  const originalThread = interaction.channel;
-  if (originalThread.isThread()) {
-    await originalThread.setLocked(false, 'Reopened');
-    await originalThread.setArchived(false, 'Reopened');
-  }
-
-  // final ack
-  await interaction.reply({
-    content: 'Thread reopened and archived copy removed.',
-    ephemeral: true
-  });
 });
-
 
 client.login(process.env.DISCORD_TOKEN);

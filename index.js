@@ -124,10 +124,7 @@ async function recreateThread(message, user) {
           name: '📊 Thread Stats',
           value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}\n• **Topics:** ${extractKeywords(threadName)}`
         },
-        {
-          name: '🔗 Links',
-          value: `• [Original Thread](https://discord.com/channels/${message.guild.id}/${originalThread.id})\n• [Archive Copy](https://discord.com/channels/${message.guild.id}/${originalThread.id})`
-        }
+      
       )
       .setFooter({ text: `Task ID: ${originalThread.id.slice(-6)} • Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` });
 
@@ -149,16 +146,11 @@ async function recreateThread(message, user) {
     // Store the starter message ID for later deletion
     const starterMessageId = starterMessage.id;
 
-    // Now create the thread from this message
-    const newThread = await starterMessage.startThread({
-      name: `✅ ${threadName}`,
-      autoArchiveDuration: 10080 // 1 week
-    });
-
+  
     rows.addComponents(
         new ButtonBuilder()
         .setLabel('🔄 Reopen')
-        .setCustomId(`reopen_${newThread.id}_${starterMessageId}`)
+        .setCustomId(`reopen_${starterMessageId}`)
         .setStyle(ButtonStyle.Primary)
     );
   
@@ -167,10 +159,6 @@ async function recreateThread(message, user) {
       {
         name: '📊 Thread Stats',
         value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}\n• **Topics:** ${extractKeywords(threadName)}`
-      },
-      {
-        name: '🔗 Links',
-        value: `• [Original Thread](https://discord.com/channels/${message.guild.id}/${originalThread.id})\n• [Archive Copy](https://discord.com/channels/${message.guild.id}/${newThread.id})`
       }
     );
   
@@ -178,52 +166,6 @@ async function recreateThread(message, user) {
         embeds: [archiveEmbeds],
         components: [rows]
     });
-
-    console.log(`Created new thread: ${newThread.name} (${newThread.id}) with parent message: ${starterMessageId}`);
-
-    const originalMessages = await originalThread.messages.fetch({ limit: 100 });
-    const sortedMessages = Array.from(originalMessages.values())
-      .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
-
-    if (originalMessages.size >= 100) {
-      await newThread.send('⚠️ **Note:** This thread had more than 100 messages. Only the most recent 100 messages are shown here due to Discord API limitations.');
-    }
-
-    for (const originalMessage of sortedMessages) {
-      if (originalMessage.system) continue;
-
-      let messageContent = `**${originalMessage.author.tag}** (${new Date(originalMessage.createdTimestamp).toLocaleString()}):\n`;
-      if (originalMessage.content) {
-        messageContent += originalMessage.content;
-      }
-      if (originalMessage.embeds && originalMessage.embeds.length > 0) {
-        messageContent += "\n[Message contained embeds]";
-      }
-      if (originalMessage.attachments && originalMessage.attachments.size > 0) {
-        messageContent += "\n**Attachments:**\n";
-        originalMessage.attachments.forEach(attachment => {
-          messageContent += `- ${attachment.name}: ${attachment.url}\n`;
-        });
-      }
-      if (messageContent.length > 1900) {
-        const chunks = splitTextIntoChunks(messageContent, 1900);
-        for (const chunk of chunks) {
-          await newThread.send(chunk);
-        }
-      } else {
-        await newThread.send(messageContent);
-      }
-    }
-
-    await newThread.send('--- End of Thread Content ---');
-      
-    // We'll no longer send additional embeds or summary messages
-    const summaryMessageId = null;
-
-    return { 
-      thread: newThread, 
-      starterMessageId: starterMessageId
-    };
 
   } catch (error) {
     console.error('Error recreating thread:', error);
@@ -448,9 +390,9 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply({ ephemeral: true });
 
       // Parse out the IDs - format is: reopen_<archiveThreadId>_<starterMessageId>
-      const [, archiveThreadId, starterMessageId] = interaction.customId.split('_');
+      const [, starterMessageId] = interaction.customId.split('_');
       
-      console.log(`Processing reopen for archive thread: ${archiveThreadId}, starter message: ${starterMessageId}`);
+      console.log(`Processing reopen for starter message: ${starterMessageId}`);
 
       // Need to find the original thread ID before deleting messages
       let originalThreadId;
@@ -520,8 +462,7 @@ client.on('interactionCreate', async (interaction) => {
                 // Also check in the fields for our thread ID
                 if (embed.fields) {
                   for (const field of embed.fields) {
-                    if (field.value && (field.value.includes(interaction.channel.id) || 
-                                       field.value.includes(archiveThreadId))) {
+                    if (field.value && (field.value.includes(interaction.channel.id) )) {
                       console.log(`Found and deleting summary message by field match: ${msg.id}`);
                       await msg.delete().catch(err => console.error('Error deleting summary message:', err));
                       break;
@@ -566,16 +507,7 @@ client.on('interactionCreate', async (interaction) => {
 
       // 3️⃣ Handle the archived thread cleanup
       try {
-        // Only delete the archive thread itself, no summary messages to worry about anymore
-        const archiveThread = await interaction.guild.channels.fetch(archiveThreadId).catch(() => null);
-        
-        if (archiveThread && archiveThread.isThread()) {
-          // Delete the thread
-          await archiveThread.delete('Thread reopened by user');
-          console.log(`Deleted archive thread: ${archiveThreadId}`);
-        } else {
-          console.log(`Could not find archive thread: ${archiveThreadId}`);
-        }
+      
         
         // Delete the starter message if we have its ID
         if (starterMessageId && completionChannel) {

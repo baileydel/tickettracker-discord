@@ -1,4 +1,24 @@
-// Discord Bot for Thread Recreation on Checkmark
+// Helper function to split long text into chunks
+function splitTextIntoChunks(text, maxLength) {
+  const chunks = [];
+  let currentChunk = '';
+
+  const lines = text.split('\n');
+  for (const line of lines) {
+    if (currentChunk.length + line.length + 1 > maxLength) {
+      chunks.push(currentChunk);
+      currentChunk = line + '\n';
+    } else {
+      currentChunk += line + '\n';
+    }
+  }
+
+  if (currentChunk) {
+    chunks.push(currentChunk);
+  }
+
+  return chunks;
+}// Discord Bot for Thread Recreation on Checkmark
 const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 require('dotenv').config();
 
@@ -93,26 +113,23 @@ async function recreateThread(message, user) {
 
     const threadName = originalThread.name || "Completed Thread";
 
-    let threadStarter = `## ✅Task Completed: 
-**Original Thread:** ${threadName}
-**Marked complete by:** ${user.tag}
-**Completed at:** ${new Date().toLocaleString()}
-**Original Thread Link:** https://discord.com/channels/${message.guild.id}/${originalThread.id}
-`;
-
-    if (threadParentMessage) {
-      threadStarter += `\n**Thread Started By:** ${threadParentMessage.author.tag}
-**Thread Start Message:** ${threadParentMessage.content ? threadParentMessage.content.substring(0, 200) : "(No content)"}${threadParentMessage.content && threadParentMessage.content.length > 200 ? "..." : ""}
-`;
-    }
-
     const archiveEmbeds = new EmbedBuilder()
-      .setColor(0x00FF00)
+      .setColor(0x22B14C)  // Green color to match screenshot
       .setTitle(`✅ Task Completed: ${threadName}`)
-
       .setDescription(
-        `A copy of this thread has been created in ${completionChannel.name} ().`
-    );
+        `This task has been marked as completed by ${user.toString()} and archived.`
+      )
+      .addFields(
+        {
+          name: '📊 Thread Stats',
+          value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}\n• **Topics:** ${extractKeywords(threadName)}`
+        },
+        {
+          name: '🔗 Links',
+          value: `• [Original Thread](https://discord.com/channels/${message.guild.id}/${originalThread.id})\n• [Archive Copy](https://discord.com/channels/${message.guild.id}/${originalThread.id})`
+        }
+      )
+      .setFooter({ text: `Task ID: ${originalThread.id.slice(-6)} • Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` });
 
     // Create a button with the thread IDs and message ID stored for reopening
     const rows = new ActionRowBuilder().addComponents(
@@ -126,7 +143,6 @@ async function recreateThread(message, user) {
     // This allows us to delete the message later if needed
     const starterMessage = await completionChannel.send({
         embeds: [archiveEmbeds],
-        content: threadStarter,
         components: [rows]
     });
 
@@ -144,11 +160,22 @@ async function recreateThread(message, user) {
         .setLabel('🔄 Reopen')
         .setCustomId(`reopen_${newThread.id}_${starterMessageId}`)
         .setStyle(ButtonStyle.Primary)
-    )
+    );
+  
+    // Update the embed with the correct archive copy link now that we have the thread ID
+    archiveEmbeds.setFields(
+      {
+        name: '📊 Thread Stats',
+        value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}\n• **Topics:** ${extractKeywords(threadName)}`
+      },
+      {
+        name: '🔗 Links',
+        value: `• [Original Thread](https://discord.com/channels/${message.guild.id}/${originalThread.id})\n• [Archive Copy](https://discord.com/channels/${message.guild.id}/${newThread.id})`
+      }
+    );
   
     await starterMessage.edit({
         embeds: [archiveEmbeds],
-        content: threadStarter,
         components: [rows]
     });
 
@@ -184,38 +211,18 @@ async function recreateThread(message, user) {
           await newThread.send(chunk);
         }
       } else {
-
-
         await newThread.send(messageContent);
       }
     }
 
     await newThread.send('--- End of Thread Content ---');
-
-
-    const archiveEmbed = new EmbedBuilder()
-      .setColor(0x00FF00)
-      .setTitle('✅ Thread Archived')
-      .setDescription(
-        `A copy of this thread has been created in ${completionChannel.name} (${newThread.id}).`
-      );
-
-    // Create a button with the thread IDs and message ID stored for reopening
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setLabel('🔄 Reopen')
-        .setCustomId(`reopen_${newThread.id}_${starterMessageId}`)
-        .setStyle(ButtonStyle.Primary)
-    );
       
-
-    // Post a summary message in the completed-tasks channel
-    const summaryMessageId = await postCompletionSummary(message, user, originalThread, newThread, completionChannel, starterMessageId);
+    // We'll no longer send additional embeds or summary messages
+    const summaryMessageId = null;
 
     return { 
       thread: newThread, 
-      starterMessageId: starterMessageId,
-      summaryMessageId: summaryMessageId
+      starterMessageId: starterMessageId
     };
 
   } catch (error) {
@@ -224,92 +231,7 @@ async function recreateThread(message, user) {
   }
 }
 
-// Post a summary of the completed task in the completed-tasks channel
-async function postCompletionSummary(message, user, originalThread, newThread, completionChannel, starterMessageId) {
-  try {
-    const targetChannel = completionChannel;
-    if (!targetChannel) {
-      console.error('Could not find target channel for summary message');
-      return null;
-    }
-
-    const memberCount = originalThread.memberCount || 'Unknown';
-    const messages = await originalThread.messages.fetch({ limit: 100 });
-    const sortedMessages = Array.from(messages.values())
-      .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
-    const firstMessage = sortedMessages[0];
-    const lastMessage = sortedMessages[sortedMessages.length - 1];
-
-    let threadDuration = 'Unknown';
-    if (firstMessage && lastMessage) {
-      const durationMs = lastMessage.createdTimestamp - firstMessage.createdTimestamp;
-      if (durationMs < 60000) {
-        threadDuration = `${Math.round(durationMs / 1000)} seconds`;
-      } else if (durationMs < 3600000) {
-        threadDuration = `${Math.round(durationMs / 60000)} minutes`;
-      } else if (durationMs < 86400000) {
-        threadDuration = `${Math.round(durationMs / 3600000)} hours`;
-      } else {
-        threadDuration = `${Math.round(durationMs / 86400000)} days`;
-      }
-    }
-
-    const participants = new Set();
-    sortedMessages.forEach(msg => {
-      if (msg.author && !msg.author.bot) {
-        participants.add(msg.author.id);
-      }
-    });
-
-    let keywords = 'N/A';
-    if (originalThread.name) {
-      const extractedKeywords = originalThread.name
-        .split(/[\s,.-_]+/)
-        .filter(word => word.length > 3)
-        .slice(0, 5);
-      if (extractedKeywords.length > 0) {
-        keywords = extractedKeywords.join(', ');
-      }
-    }
-
-
-
-    const summaryEmbed = {
-      color: 0x00FF00,
-      title: `✅ Task Completed: ${originalThread.name}`,
-      description: `This task has been marked as completed by ${user.toString()} and archived.`,
-      fields: [
-        {
-          name: '📊 Thread Stats',
-          value: `• **Duration:** ${threadDuration}\n• **Messages:** ${sortedMessages.length}\n• **Participants:** ${participants.size}\n• **Topics:** ${keywords}`
-        },
-        {
-          name: '🔗 Links',
-          value: `• [Original Thread](https://discord.com/channels/${message.guild.id}/${originalThread.id})\n• [Archive Copy](https://discord.com/channels/${message.guild.id}/${newThread.id})`
-        }
-      ],
-      timestamp: new Date(),
-      footer: {
-        text: `Task ID: ${originalThread.id.slice(-6)}`
-      }
-    };
-
-    // Store the original thread ID and thread name in the embed for easier lookup when reopening
-    summaryEmbed.fields.push({
-      name: "Thread Info",
-      value: `Thread ID: ${originalThread.id}\nStarter Message ID: ${starterMessageId}`
-    });
-
-    const summaryMessage = await targetChannel.send({ embeds: [summaryEmbed] });
-    console.log(`Posted completion summary in channel: ${targetChannel.id}, message ID: ${summaryMessage.id}`);
-    
-    return summaryMessage.id;
-
-  } catch (error) {
-    console.error('Error posting completion summary:', error);
-    return null;
-  }
-}
+// Note: We've removed the postCompletionSummary function as it's no longer needed
 
 // Function to create a regular completion notification for non-thread messages
 async function createCompletionNotification(message, user) {
@@ -390,26 +312,71 @@ async function createCompletionNotification(message, user) {
   }
 }
 
-// Helper function to split long text into chunks
-function splitTextIntoChunks(text, maxLength) {
-  const chunks = [];
-  let currentChunk = '';
-
-  const lines = text.split('\n');
-  for (const line of lines) {
-    if (currentChunk.length + line.length + 1 > maxLength) {
-      chunks.push(currentChunk);
-      currentChunk = line + '\n';
+// Helper functions for thread statistics
+async function getThreadDuration(thread) {
+  try {
+    const messages = await thread.messages.fetch({ limit: 100 });
+    const sortedMessages = Array.from(messages.values())
+      .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    
+    if (sortedMessages.length < 2) return "0 seconds";
+    
+    const firstMessage = sortedMessages[0];
+    const lastMessage = sortedMessages[sortedMessages.length - 1];
+    
+    const durationMs = lastMessage.createdTimestamp - firstMessage.createdTimestamp;
+    if (durationMs < 60000) {
+      return `${Math.round(durationMs / 1000)} seconds`;
+    } else if (durationMs < 3600000) {
+      return `${Math.round(durationMs / 60000)} minutes`;
+    } else if (durationMs < 86400000) {
+      return `${Math.round(durationMs / 3600000)} hours`;
     } else {
-      currentChunk += line + '\n';
+      return `${Math.round(durationMs / 86400000)} days`;
     }
+  } catch (error) {
+    console.error('Error calculating thread duration:', error);
+    return "Unknown";
   }
+}
 
-  if (currentChunk) {
-    chunks.push(currentChunk);
+async function getMessageCount(thread) {
+  try {
+    const messages = await thread.messages.fetch({ limit: 100 });
+    return messages.size;
+  } catch (error) {
+    console.error('Error counting messages:', error);
+    return 0;
   }
+}
 
-  return chunks;
+async function getParticipantCount(thread) {
+  try {
+    const messages = await thread.messages.fetch({ limit: 100 });
+    const participants = new Set();
+    
+    messages.forEach(msg => {
+      if (msg.author && !msg.author.bot) {
+        participants.add(msg.author.id);
+      }
+    });
+    
+    return participants.size;
+  } catch (error) {
+    console.error('Error counting participants:', error);
+    return 0;
+  }
+}
+
+function extractKeywords(threadName) {
+  if (!threadName) return "N/A";
+  
+  const keywords = threadName
+    .split(/[\s,.-_]+/)
+    .filter(word => word.length > 3)
+    .slice(0, 5);
+    
+  return keywords.length > 0 ? keywords.join(', ') : threadName;
 }
 
 // COMPLETELY REWRITTEN REACTION HANDLER
@@ -573,7 +540,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // 4️⃣ Handle the archived thread cleanup
     try {
-      // Get the archived thread
+      // Only delete the archive thread itself, no summary messages to worry about anymore
       const archiveThread = await interaction.guild.channels.fetch(archiveThreadId).catch(() => null);
       
       if (archiveThread && archiveThread.isThread()) {
@@ -583,11 +550,19 @@ client.on('interactionCreate', async (interaction) => {
       } else {
         console.log(`Could not find archive thread: ${archiveThreadId}`);
       }
-    } 
-    catch (err) {
-      console.error('Error deleting archive thread:', err);
+      
+      // Delete the starter message if we have its ID
+      if (starterMessageId && completionChannel) {
+        try {
+          await completionChannel.messages.delete(starterMessageId);
+          console.log(`Deleted starter message: ${starterMessageId}`);
+        } catch (err) {
+          console.log(`Could not delete starter message: ${starterMessageId}`);
+        }
+      }
+    } catch (err) {
+      console.error('Error cleaning up archived content:', err);
     }
-
 
     // 7️⃣ Provide feedback to the user
     await interaction.editReply({

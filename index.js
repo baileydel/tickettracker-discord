@@ -18,7 +18,9 @@ function splitTextIntoChunks(text, maxLength) {
   }
 
   return chunks;
-}// Discord Bot for Thread Recreation on Checkmark
+}
+
+// Discord Bot for Thread Recreation on Checkmark
 const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 require('dotenv').config();
 
@@ -43,9 +45,11 @@ const client = new Client({
 const TARGET_CHANNEL_ID = process.env.TARGET_CHANNEL_ID;
 const COMPLETION_CHANNEL_ID = process.env.COMPLETION_CHANNEL_ID || "completed-tasks";
 const CHECKMARK_EMOJIS = ['✅', '✓', '☑️', '🗸', '☑', '✔️', '✔'];
+// Flag to enable/disable test thread creation on startup
+const CREATE_TEST_THREAD = process.env.CREATE_TEST_THREAD === 'true' || false;
 
 // When the client is ready
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`Ready! Logged in as ${client.user.tag}`);
   console.log(`Monitoring for checkmark reactions in channel: ${TARGET_CHANNEL_ID}`);
   console.log(`Recreating threads in channel: ${COMPLETION_CHANNEL_ID}`);
@@ -70,7 +74,46 @@ client.once('ready', () => {
       }
     }
   });
+
+  // Create a test thread if enabled
+  if (CREATE_TEST_THREAD) {
+    try {
+      await createTestThread();
+      console.log("Test thread created successfully");
+    } catch (error) {
+      console.error("Failed to create test thread:", error);
+    }
+  }
 });
+
+// Function to create a minimal test thread on bot startup
+async function createTestThread() {
+  try {
+    // Get the target channel
+    const targetChannel = await client.channels.fetch(TARGET_CHANNEL_ID);
+    if (!targetChannel) {
+      console.error(`Target channel not found: ${TARGET_CHANNEL_ID}`);
+      return;
+    }
+
+    // Send a simple test message to the target channel
+    const testMessage = await targetChannel.send("Test");
+
+    // Create a thread from the message with a minimal title
+    const thread = await testMessage.startThread({
+      name: "Test Thread",
+      autoArchiveDuration: 60, // Auto-archive after 1 hour
+    });
+    
+    // Send a simple message in the thread
+    await thread.send("Test");
+    
+    return thread;
+  } catch (error) {
+    console.error('Error creating test thread:', error);
+    throw error;
+  }
+}
 
 // Function to recreate a thread with its contents
 async function recreateThread(message, user) {
@@ -110,6 +153,33 @@ async function recreateThread(message, user) {
     }
 
     await originalThread.fetch();
+    
+    // Add a completion message in the original thread
+    const threadCompletionEmbed = new EmbedBuilder()
+      .setColor(0x22B14C) // Green color
+      .setTitle('✅ Task Marked as Completed')
+      .setDescription(`This task has been marked as completed by ${user.toString()}.`)
+      .setTimestamp()
+      .setFooter({ text: `The thread will be locked for further messages.` });
+    
+    await originalThread.send({ embeds: [threadCompletionEmbed] });
+    
+    // Lock the thread to prevent further messages
+    try {
+      // Update the thread title to add a checkmark
+      const originalTitle = originalThread.name;
+      // Only add checkmark if it doesn't already have one
+      if (!originalTitle.startsWith('✅')) {
+        await originalThread.setName(`✅ ${originalTitle}`);
+        console.log(`Updated thread title to: ✅ ${originalTitle}`);
+      }
+      
+      // Lock the thread
+      await originalThread.setLocked(true);
+      console.log(`Thread ${originalThread.id} has been locked`);
+    } catch (error) {
+      console.error('Error updating thread title or locking thread:', error);
+    }
 
     const threadName = originalThread.name || "Completed Thread";
 
@@ -124,7 +194,10 @@ async function recreateThread(message, user) {
           name: '📊 Thread Stats',
           value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}\n• **Topics:** ${extractKeywords(threadName)}`
         },
-      
+        {
+          name: 'Original Thread',
+          value: `<#${originalThread.id}>`
+        }
       )
       .setFooter({ text: `Task ID: ${originalThread.id.slice(-6)} • Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` });
 
@@ -150,7 +223,7 @@ async function recreateThread(message, user) {
     rows.addComponents(
         new ButtonBuilder()
         .setLabel('🔄 Reopen')
-        .setCustomId(`reopen_${starterMessageId}`)
+        .setCustomId(`reopen_${starterMessageId}_${originalThread.id}`)
         .setStyle(ButtonStyle.Primary)
     );
   
@@ -159,6 +232,10 @@ async function recreateThread(message, user) {
       {
         name: '📊 Thread Stats',
         value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}\n• **Topics:** ${extractKeywords(threadName)}`
+      },
+      {
+        name: 'Original Thread',
+        value: `<#${originalThread.id}>`
       }
     );
   
@@ -172,8 +249,6 @@ async function recreateThread(message, user) {
     return null;
   }
 }
-
-// Note: We've removed the postCompletionSummary function as it's no longer needed
 
 // Function to create a regular completion notification for non-thread messages
 async function createCompletionNotification(message, user) {
@@ -321,7 +396,7 @@ function extractKeywords(threadName) {
   return keywords.length > 0 ? keywords.join(', ') : threadName;
 }
 
-// COMPLETELY REWRITTEN REACTION HANDLER
+// REACTION HANDLER
 client.on('messageReactionAdd', async (reaction, user) => {
   if (user.bot) return;
 
@@ -380,22 +455,73 @@ client.on('messageReactionAdd', async (reaction, user) => {
   }
 });
 
-// COMPLETELY REWRITTEN INTERACTION HANDLER
-// COMPLETELY REWRITTEN INTERACTION HANDLER
+// INTERACTION HANDLER
 client.on('interactionCreate', async (interaction) => {
+  // Handle test thread interactions - simplified for minimal test thread
+  if (interaction.isButton() && interaction.customId === 'test_complete') {
+    try {
+      // Acknowledge the interaction
+      await interaction.deferReply({ ephemeral: true });
+      
+      // Mark the test thread as completed
+      await recreateThread(interaction.message, interaction.user);
+      
+      // Provide feedback
+      await interaction.editReply({
+        content: 'Test thread has been marked as completed.',
+        ephemeral: true
+      });
+    } catch (error) {
+      console.error('Error handling test complete button:', error);
+      await interaction.editReply({
+        content: 'An error occurred.',
+        ephemeral: true
+      }).catch(() => null);
+    }
+  }
+  
+  else if (interaction.isButton() && interaction.customId === 'test_delete') {
+    try {
+      // Acknowledge the interaction
+      await interaction.deferReply({ ephemeral: true });
+      
+      // Delete the thread if it exists
+      if (interaction.message.thread) {
+        await interaction.message.thread.delete();
+      }
+      
+      // Delete the message
+      await interaction.message.delete();
+      
+      // Provide feedback
+      await interaction.editReply({
+        content: 'Test thread deleted.',
+        ephemeral: true
+      });
+    } catch (error) {
+      console.error('Error handling test delete button:', error);
+      await interaction.editReply({
+        content: 'An error occurred.',
+        ephemeral: true
+      }).catch(() => null);
+    }
+  }
+  
   // Handle reopen button clicks
-  if (interaction.isButton() && interaction.customId.startsWith('reopen_')) {
+  else if (interaction.isButton() && interaction.customId.startsWith('reopen_')) {
     try {
       // Acknowledge the interaction immediately
       await interaction.deferReply({ ephemeral: true });
 
-      // Parse out the IDs - format is: reopen_<archiveThreadId>_<starterMessageId>
-      const [, starterMessageId] = interaction.customId.split('_');
+      // Parse out the IDs - format is: reopen_<starterMessageId>_<originalThreadId>
+      const parts = interaction.customId.split('_');
+      const starterMessageId = parts[1];
+      // Check if thread ID was included in the custom ID
+      let originalThreadId = parts.length > 2 ? parts[2] : null;
       
-      console.log(`Processing reopen for starter message: ${starterMessageId}`);
+      console.log(`Processing reopen for starter message: ${starterMessageId}, thread: ${originalThreadId || 'unknown'}`);
 
-      // Need to find the original thread ID before deleting messages
-      let originalThreadId;
+      // If we don't have a thread ID from the custom ID, try to find it in the message
       
       // Get the completion channel
       let completionChannel;
@@ -414,15 +540,73 @@ client.on('interactionCreate', async (interaction) => {
       // Extract the original thread ID from the embed before deletion
       if (interaction.message && interaction.message.embeds && interaction.message.embeds.length > 0) {
         const embed = interaction.message.embeds[0];
-        if (embed.fields) {
+        
+        // Try to get the thread ID from the first component (URL button)
+        if (interaction.message.components && 
+            interaction.message.components.length > 0 && 
+            interaction.message.components[0].components && 
+            interaction.message.components[0].components.length > 0) {
+            
+            const firstButton = interaction.message.components[0].components[0];
+            if (firstButton.style === ButtonStyle.Link && firstButton.url) {
+                const urlMatch = firstButton.url.match(/channels\/\d+\/(\d+)/);
+                if (urlMatch && urlMatch[1]) {
+                    originalThreadId = urlMatch[1];
+                    console.log(`Found original thread ID from button URL: ${originalThreadId}`);
+                }
+            }
+        }
+        
+        // If we still don't have the thread ID, try to get it from fields
+        if (!originalThreadId && embed.fields) {
+          // Look for any field that might contain links or thread information
+          for (const field of embed.fields) {
+            if (field.value) {
+              // Look for Discord channel mention format: <#123456789>
+              const channelMentionMatch = field.value.match(/<#(\d+)>/);
+              if (channelMentionMatch && channelMentionMatch[1]) {
+                originalThreadId = channelMentionMatch[1];
+                console.log(`Found original thread ID from channel mention: ${originalThreadId}`);
+                break;
+              }
+              
+              // Look for Discord URL format
+              const urlMatch = field.value.match(/channels\/\d+\/(\d+)/);
+              if (urlMatch && urlMatch[1]) {
+                originalThreadId = urlMatch[1];
+                console.log(`Found original thread ID from URL in field: ${originalThreadId}`);
+                break;
+              }
+            }
+          }
+          
+          // Last attempt: check for links field specifically
           const linksField = embed.fields.find(field => field.name === '🔗 Links');
-          if (linksField && linksField.value) {
+          if (!originalThreadId && linksField && linksField.value) {
             // Extract the original thread ID from the link
             const originalThreadMatch = linksField.value.match(/channels\/\d+\/(\d+)/);
             if (originalThreadMatch && originalThreadMatch[1]) {
               originalThreadId = originalThreadMatch[1];
-              console.log(`Found original thread ID: ${originalThreadId}`);
+              console.log(`Found original thread ID from Links field: ${originalThreadId}`);
             }
+          }
+        }
+        
+        // Try to get thread ID from the title
+        if (!originalThreadId && embed.title) {
+          const taskIdMatch = embed.title.match(/Task ID: (\d+)/i);
+          if (taskIdMatch && taskIdMatch[1]) {
+            originalThreadId = taskIdMatch[1];
+            console.log(`Found original thread ID from title: ${originalThreadId}`);
+          }
+        }
+        
+        // Try to get thread ID from the footer
+        if (!originalThreadId && embed.footer && embed.footer.text) {
+          const taskIdMatch = embed.footer.text.match(/Task ID: (\d+)/i);
+          if (taskIdMatch && taskIdMatch[1]) {
+            originalThreadId = taskIdMatch[1];
+            console.log(`Found original thread ID from footer: ${originalThreadId}`);
           }
         }
       }
@@ -507,8 +691,6 @@ client.on('interactionCreate', async (interaction) => {
 
       // 3️⃣ Handle the archived thread cleanup
       try {
-      
-        
         // Delete the starter message if we have its ID
         if (starterMessageId && completionChannel) {
           try {
@@ -518,16 +700,62 @@ client.on('interactionCreate', async (interaction) => {
             console.log(`Could not delete starter message: ${starterMessageId}`);
           }
         }
+        
+        // Unlock the original thread if it exists
+        if (originalThreadId) {
+          try {
+            const originalThread = await interaction.guild.channels.fetch(originalThreadId).catch(() => null);
+            if (originalThread && originalThread.isThread()) {
+              await originalThread.setLocked(false);
+              console.log(`Thread ${originalThreadId} has been unlocked`);
+            }
+          } catch (error) {
+            console.error('Error unlocking thread:', error);
+          }
+        }
       } catch (err) {
         console.error('Error cleaning up archived content:', err);
       }
       
-      // 4️⃣ NEW FEATURE: Send a reopen notification to the parent channel of the thread
+      // 4️⃣ Send a reopen notification to the parent channel of the thread
       if (originalThreadId) {
         try {
           const originalThread = await interaction.guild.channels.fetch(originalThreadId).catch(() => null);
           
           if (originalThread && originalThread.isThread()) {
+            // Unlock the thread
+            try {
+              // Update thread title to add reopen symbol
+              const currentTitle = originalThread.name;
+              // Remove the checkmark if it exists and add the reopen symbol
+              let newTitle = currentTitle;
+              if (currentTitle.startsWith('✅ ')) {
+                newTitle = currentTitle.substring(2);
+              }
+              
+              // Only add reopen symbol if it doesn't already have one
+              if (!newTitle.startsWith('🔄')) {
+                await originalThread.setName(`🔄 ${newTitle}`);
+                console.log(`Updated thread title to: 🔄 ${newTitle}`);
+              }
+              
+              // Unlock the thread
+              await originalThread.setLocked(false);
+              console.log(`Thread ${originalThreadId} has been unlocked`);
+              
+              // Send a reopen notification in the original thread
+              const threadReopenEmbed = new EmbedBuilder()
+                .setColor(0x3498DB) // Blue color
+                .setTitle('🔄 Task Reopened')
+                .setDescription(`This task has been reopened by ${interaction.user.toString()}.`)
+                .setTimestamp()
+                .setFooter({ text: `The thread has been unlocked for further messages.` });
+              
+              await originalThread.send({ embeds: [threadReopenEmbed] });
+            } catch (error) {
+              console.error('Error updating thread title, unlocking thread, or sending notification:', error);
+            }
+            
             // Get the parent channel of the thread
             const parentChannel = originalThread.parent;
             
@@ -617,7 +845,7 @@ client.on('interactionCreate', async (interaction) => {
                   })
                   .setTimestamp()
                   .setFooter({ 
-                    text: `Task ID: Unknown • Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` 
+                    text: `Task ID: ${originalThreadId ? originalThreadId.slice(-6) : 'Unknown'} • Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` 
                   });
                   
                 await targetChannel.send({ embeds: [reopenEmbed] });

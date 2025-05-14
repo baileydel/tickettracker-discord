@@ -154,6 +154,39 @@ async function recreateThread(message, user) {
 
     await originalThread.fetch();
     
+    // NEW CODE: Send completion notification inside the thread before locking
+    try {
+      const completionNotificationEmbed = new EmbedBuilder()
+        .setColor(0x22B14C)  // Green color to match archived notification
+        .setTitle(`✅ Thread Marked Complete`)
+        .setDescription(`This thread has been marked as completed by ${user.toString()} on ${new Date().toLocaleString('en-US', {
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        })}`)
+        .addFields(
+          {
+            name: '📊 Thread Stats',
+            value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}`
+          }
+        )
+        .setFooter({ 
+          text: `Thread ID: ${originalThread.id.slice(-6)}` 
+        });
+      
+      // Send the notification to the thread
+      await originalThread.send({ 
+        embeds: [completionNotificationEmbed] 
+      });
+      console.log(`Sent completion notification inside thread: ${originalThread.id}`);
+    } catch (notificationError) {
+      console.error('Error sending completion notification inside thread:', notificationError);
+      // Continue with thread locking even if notification fails
+    }
+    
     // Lock the thread to prevent further messages
     try {
       await originalThread.setLocked(true);
@@ -424,12 +457,13 @@ client.on('messageReactionAdd', async (reaction, user) => {
         return;
       }
 
+      // Use the existing recreateThread function to handle completion
+      // The notification will be sent inside this function
       await recreateThread(reaction.message, user);
 
       reaction.message.delete().catch(error => {
         console.error('Failed to delete original message:', error);
       });
-
     }
   } catch (error) {
     console.error('Error processing reaction:', error);
@@ -488,192 +522,164 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
   
-  // Handle reopen button clicks
-  else if (interaction.isButton() && interaction.customId.startsWith('reopen_')) {
+// Handle reopen button clicks
+else if (interaction.isButton() && interaction.customId.startsWith('reopen_')) {
+  try {
+    // Acknowledge the interaction immediately
+    await interaction.deferReply({ ephemeral: true });
+
+    // Parse out the IDs - format is: reopen_<starterMessageId>_<originalThreadId>
+    const parts = interaction.customId.split('_');
+    const starterMessageId = parts[1];
+    // Check if thread ID was included in the custom ID
+    let originalThreadId = parts.length > 2 ? parts[2] : null;
+    
+    console.log(`Processing reopen for starter message: ${starterMessageId}, thread: ${originalThreadId || 'unknown'}`);
+
+    // If we don't have a thread ID from the custom ID, try to find it in the message
+    
+    // Get the completion channel
+    let completionChannel;
     try {
-      // Acknowledge the interaction immediately
-      await interaction.deferReply({ ephemeral: true });
-
-      // Parse out the IDs - format is: reopen_<starterMessageId>_<originalThreadId>
-      const parts = interaction.customId.split('_');
-      const starterMessageId = parts[1];
-      // Check if thread ID was included in the custom ID
-      let originalThreadId = parts.length > 2 ? parts[2] : null;
+      if (isNaN(COMPLETION_CHANNEL_ID)) {
+        completionChannel = interaction.guild.channels.cache.find(
+          channel => channel.name === COMPLETION_CHANNEL_ID && channel.type === 0
+        );
+      } else {
+        completionChannel = await interaction.guild.channels.fetch(COMPLETION_CHANNEL_ID);
+      }
+    } catch (err) {
+      console.error('Failed to get completion channel:', err);
+    }
+    
+    // Extract the original thread ID from the embed before deletion
+    if (interaction.message && interaction.message.embeds && interaction.message.embeds.length > 0) {
+      const embed = interaction.message.embeds[0];
       
-      console.log(`Processing reopen for starter message: ${starterMessageId}, thread: ${originalThreadId || 'unknown'}`);
-
-      // If we don't have a thread ID from the custom ID, try to find it in the message
-      
-      // Get the completion channel
-      let completionChannel;
-      try {
-        if (isNaN(COMPLETION_CHANNEL_ID)) {
-          completionChannel = interaction.guild.channels.cache.find(
-            channel => channel.name === COMPLETION_CHANNEL_ID && channel.type === 0
-          );
-        } else {
-          completionChannel = await interaction.guild.channels.fetch(COMPLETION_CHANNEL_ID);
-        }
-      } catch (err) {
-        console.error('Failed to get completion channel:', err);
+      // Try to get the thread ID from the first component (URL button)
+      if (interaction.message.components && 
+          interaction.message.components.length > 0 && 
+          interaction.message.components[0].components && 
+          interaction.message.components[0].components.length > 0) {
+          
+          const firstButton = interaction.message.components[0].components[0];
+          if (firstButton.style === ButtonStyle.Link && firstButton.url) {
+              const urlMatch = firstButton.url.match(/channels\/\d+\/(\d+)/);
+              if (urlMatch && urlMatch[1]) {
+                  originalThreadId = urlMatch[1];
+                  console.log(`Found original thread ID from button URL: ${originalThreadId}`);
+              }
+          }
       }
       
-      // Extract the original thread ID from the embed before deletion
-      if (interaction.message && interaction.message.embeds && interaction.message.embeds.length > 0) {
-        const embed = interaction.message.embeds[0];
-        
-        // Try to get the thread ID from the first component (URL button)
-        if (interaction.message.components && 
-            interaction.message.components.length > 0 && 
-            interaction.message.components[0].components && 
-            interaction.message.components[0].components.length > 0) {
-            
-            const firstButton = interaction.message.components[0].components[0];
-            if (firstButton.style === ButtonStyle.Link && firstButton.url) {
-                const urlMatch = firstButton.url.match(/channels\/\d+\/(\d+)/);
-                if (urlMatch && urlMatch[1]) {
-                    originalThreadId = urlMatch[1];
-                    console.log(`Found original thread ID from button URL: ${originalThreadId}`);
-                }
+      // If we still don't have the thread ID, try to get it from fields
+      if (!originalThreadId && embed.fields) {
+        // Look for any field that might contain links or thread information
+        for (const field of embed.fields) {
+          if (field.value) {
+            // Look for Discord channel mention format: <#123456789>
+            const channelMentionMatch = field.value.match(/<#(\d+)>/);
+            if (channelMentionMatch && channelMentionMatch[1]) {
+              originalThreadId = channelMentionMatch[1];
+              console.log(`Found original thread ID from channel mention: ${originalThreadId}`);
+              break;
             }
+            
+            // Look for Discord URL format
+            const urlMatch = field.value.match(/channels\/\d+\/(\d+)/);
+            if (urlMatch && urlMatch[1]) {
+              originalThreadId = urlMatch[1];
+              console.log(`Found original thread ID from URL in field: ${originalThreadId}`);
+              break;
+            }
+          }
         }
         
-        // If we still don't have the thread ID, try to get it from fields
-        if (!originalThreadId && embed.fields) {
-          // Look for any field that might contain links or thread information
-          for (const field of embed.fields) {
-            if (field.value) {
-              // Look for Discord channel mention format: <#123456789>
-              const channelMentionMatch = field.value.match(/<#(\d+)>/);
-              if (channelMentionMatch && channelMentionMatch[1]) {
-                originalThreadId = channelMentionMatch[1];
-                console.log(`Found original thread ID from channel mention: ${originalThreadId}`);
+        // Last attempt: check for links field specifically
+        const linksField = embed.fields.find(field => field.name === '🔗 Links');
+        if (!originalThreadId && linksField && linksField.value) {
+          // Extract the original thread ID from the link
+          const originalThreadMatch = linksField.value.match(/channels\/\d+\/(\d+)/);
+          if (originalThreadMatch && originalThreadMatch[1]) {
+            originalThreadId = originalThreadMatch[1];
+            console.log(`Found original thread ID from Links field: ${originalThreadId}`);
+          }
+        }
+      }
+      
+      // Try to get thread ID from the title
+      if (!originalThreadId && embed.title) {
+        const taskIdMatch = embed.title.match(/Task ID: (\d+)/i);
+        if (taskIdMatch && taskIdMatch[1]) {
+          originalThreadId = taskIdMatch[1];
+          console.log(`Found original thread ID from title: ${originalThreadId}`);
+        }
+      }
+      
+      // Try to get thread ID from the footer
+      if (!originalThreadId && embed.footer && embed.footer.text) {
+        const taskIdMatch = embed.footer.text.match(/Task ID: (\d+)/i);
+        if (taskIdMatch && taskIdMatch[1]) {
+          originalThreadId = taskIdMatch[1];
+          console.log(`Found original thread ID from footer: ${originalThreadId}`);
+        }
+      }
+    }
+    
+    // Get the title of the completed task for the reopen notification
+    let taskTitle = "Unknown Task";
+    if (interaction.message && interaction.message.embeds && interaction.message.embeds.length > 0) {
+      const embed = interaction.message.embeds[0];
+      if (embed.title && embed.title.startsWith('✅ Task Completed:')) {
+        taskTitle = embed.title.replace('✅ Task Completed:', '').trim();
+      }
+    }
+
+    // 1️⃣ Delete the button message in the original thread
+    await interaction.message.delete().catch(error => {
+      console.error('Failed to delete button message:', error);
+    });
+
+    // 2️⃣ Find and delete all related messages in the completion channel
+    if (completionChannel) {
+      try {
+        // First, try to find the summary message by task ID in the footer
+        const recentMessages = await completionChannel.messages.fetch({ limit: 50 });
+        
+        // Find summary embed messages
+        for (const [id, msg] of recentMessages.entries()) {
+          // Look for messages with embeds that might be our summary
+          if (msg.embeds && msg.embeds.length > 0) {
+            for (const embed of msg.embeds) {
+              // Check if this embed mentions our thread ID
+              if (embed.footer && embed.footer.text && embed.footer.text.includes(interaction.channel.id.slice(-6))) {
+                console.log(`Found and deleting summary message: ${msg.id}`);
+                await msg.delete().catch(err => console.error('Error deleting summary message:', err));
                 break;
               }
               
-              // Look for Discord URL format
-              const urlMatch = field.value.match(/channels\/\d+\/(\d+)/);
-              if (urlMatch && urlMatch[1]) {
-                originalThreadId = urlMatch[1];
-                console.log(`Found original thread ID from URL in field: ${originalThreadId}`);
-                break;
-              }
-            }
-          }
-          
-          // Last attempt: check for links field specifically
-          const linksField = embed.fields.find(field => field.name === '🔗 Links');
-          if (!originalThreadId && linksField && linksField.value) {
-            // Extract the original thread ID from the link
-            const originalThreadMatch = linksField.value.match(/channels\/\d+\/(\d+)/);
-            if (originalThreadMatch && originalThreadMatch[1]) {
-              originalThreadId = originalThreadMatch[1];
-              console.log(`Found original thread ID from Links field: ${originalThreadId}`);
-            }
-          }
-        }
-        
-        // Try to get thread ID from the title
-        if (!originalThreadId && embed.title) {
-          const taskIdMatch = embed.title.match(/Task ID: (\d+)/i);
-          if (taskIdMatch && taskIdMatch[1]) {
-            originalThreadId = taskIdMatch[1];
-            console.log(`Found original thread ID from title: ${originalThreadId}`);
-          }
-        }
-        
-        // Try to get thread ID from the footer
-        if (!originalThreadId && embed.footer && embed.footer.text) {
-          const taskIdMatch = embed.footer.text.match(/Task ID: (\d+)/i);
-          if (taskIdMatch && taskIdMatch[1]) {
-            originalThreadId = taskIdMatch[1];
-            console.log(`Found original thread ID from footer: ${originalThreadId}`);
-          }
-        }
-      }
-      
-      // Get the title of the completed task for the reopen notification
-      let taskTitle = "Unknown Task";
-      if (interaction.message && interaction.message.embeds && interaction.message.embeds.length > 0) {
-        const embed = interaction.message.embeds[0];
-        if (embed.title && embed.title.startsWith('✅ Task Completed:')) {
-          taskTitle = embed.title.replace('✅ Task Completed:', '').trim();
-        }
-      }
-
-      // 1️⃣ Delete the button message in the original thread
-      await interaction.message.delete().catch(error => {
-        console.error('Failed to delete button message:', error);
-      });
-
-      // 2️⃣ Find and delete all related messages in the completion channel
-      if (completionChannel) {
-        try {
-          // First, try to find the summary message by task ID in the footer
-          const recentMessages = await completionChannel.messages.fetch({ limit: 50 });
-          
-          // Find summary embed messages
-          for (const [id, msg] of recentMessages.entries()) {
-            // Look for messages with embeds that might be our summary
-            if (msg.embeds && msg.embeds.length > 0) {
-              for (const embed of msg.embeds) {
-                // Check if this embed mentions our thread ID
-                if (embed.footer && embed.footer.text && embed.footer.text.includes(interaction.channel.id.slice(-6))) {
-                  console.log(`Found and deleting summary message: ${msg.id}`);
-                  await msg.delete().catch(err => console.error('Error deleting summary message:', err));
-                  break;
-                }
-                
-                // Also check in the fields for our thread ID
-                if (embed.fields) {
-                  for (const field of embed.fields) {
-                    if (field.value && (field.value.includes(interaction.channel.id) )) {
-                      console.log(`Found and deleting summary message by field match: ${msg.id}`);
-                      await msg.delete().catch(err => console.error('Error deleting summary message:', err));
-                      break;
-                    }
+              // Also check in the fields for our thread ID
+              if (embed.fields) {
+                for (const field of embed.fields) {
+                  if (field.value && (field.value.includes(interaction.channel.id) )) {
+                    console.log(`Found and deleting summary message by field match: ${msg.id}`);
+                    await msg.delete().catch(err => console.error('Error deleting summary message:', err));
+                    break;
                   }
                 }
               }
             }
-            
-            // Also look for direct messages containing our thread ID in the text
-            if (msg.content && msg.content.includes(interaction.channel.id)) {
-              console.log(`Found and deleting related message by content: ${msg.id}`);
-              await msg.delete().catch(err => console.error('Error deleting related message:', err));
-            }
           }
           
-          // Try to delete the starter message directly
-          if (starterMessageId) {
-            try {
-              await completionChannel.messages.delete(starterMessageId);
-              console.log(`Deleted starter message: ${starterMessageId}`);
-            } catch (err) {
-              console.log(`Could not delete starter message: ${starterMessageId}`);
-            }
+          // Also look for direct messages containing our thread ID in the text
+          if (msg.content && msg.content.includes(interaction.channel.id)) {
+            console.log(`Found and deleting related message by content: ${msg.id}`);
+            await msg.delete().catch(err => console.error('Error deleting related message:', err));
           }
-          
-          // Additional check for "Thread Completed" messages without embeds
-          const threadCompletedMessages = recentMessages.filter(msg => 
-            msg.content && 
-            msg.content.includes("Thread Completed") && 
-            msg.content.includes(interaction.channel.name)
-          );
-          
-          for (const [id, msg] of threadCompletedMessages) {
-            console.log(`Found and deleting thread completed message: ${msg.id}`);
-            await msg.delete().catch(err => console.error('Error deleting thread completed message:', err));
-          }
-        } catch (err) {
-          console.error('Error cleaning up completion channel messages:', err);
         }
-      }
-
-      // 3️⃣ Handle the archived thread cleanup
-      try {
-        // Delete the starter message if we have its ID
-        if (starterMessageId && completionChannel) {
+        
+        // Try to delete the starter message directly
+        if (starterMessageId) {
           try {
             await completionChannel.messages.delete(starterMessageId);
             console.log(`Deleted starter message: ${starterMessageId}`);
@@ -682,40 +688,159 @@ client.on('interactionCreate', async (interaction) => {
           }
         }
         
-        // Unlock the original thread if it exists
-        if (originalThreadId) {
-          try {
-            const originalThread = await interaction.guild.channels.fetch(originalThreadId).catch(() => null);
-            if (originalThread && originalThread.isThread()) {
-              await originalThread.setLocked(false);
-              console.log(`Thread ${originalThreadId} has been unlocked`);
-            }
-          } catch (error) {
-            console.error('Error unlocking thread:', error);
-          }
+        // Additional check for "Thread Completed" messages without embeds
+        const threadCompletedMessages = recentMessages.filter(msg => 
+          msg.content && 
+          msg.content.includes("Thread Completed") && 
+          msg.content.includes(interaction.channel.name)
+        );
+        
+        for (const [id, msg] of threadCompletedMessages) {
+          console.log(`Found and deleting thread completed message: ${msg.id}`);
+          await msg.delete().catch(err => console.error('Error deleting thread completed message:', err));
         }
       } catch (err) {
-        console.error('Error cleaning up archived content:', err);
+        console.error('Error cleaning up completion channel messages:', err);
+      }
+    }
+
+    // 3️⃣ Handle the archived thread cleanup
+    try {
+      // Delete the starter message if we have its ID
+      if (starterMessageId && completionChannel) {
+        try {
+          await completionChannel.messages.delete(starterMessageId);
+          console.log(`Deleted starter message: ${starterMessageId}`);
+        } catch (err) {
+          console.log(`Could not delete starter message: ${starterMessageId}`);
+        }
       }
       
-      // 4️⃣ Send a reopen notification to the parent channel of the thread
+      // Unlock the original thread if it exists
       if (originalThreadId) {
         try {
           const originalThread = await interaction.guild.channels.fetch(originalThreadId).catch(() => null);
-          
           if (originalThread && originalThread.isThread()) {
-            // Unlock the thread
+            console.log(`Attempting to send notification to thread: ${originalThreadId} before unlocking`);
+            
+            // First send the notification before unlocking the thread
+            // This ensures the message can be sent even if there's a race condition with locking
             try {
-              await originalThread.setLocked(false);
-              console.log(`Thread ${originalThreadId} has been unlocked`);
-            } catch (error) {
-              console.error('Error unlocking thread:', error);
+              // Create a notification inside the thread that it's been reopened
+              const threadNotificationEmbed = new EmbedBuilder()
+                .setColor(0x3498DB) // Blue color
+                .setTitle(`🔄 Thread Reopened`)
+                .setDescription(`This thread has been reopened by ${interaction.user.toString()} on ${new Date().toLocaleString('en-US', {
+                  weekday: 'short',
+                  month: 'short',
+                  day: 'numeric',
+                  year: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit'
+                })}`)
+                .setFooter({ 
+                  text: `Thread ID: ${originalThread.id.slice(-6)}` 
+                });
+              
+              // First unlock the thread, with additional error handling
+              try {
+                await originalThread.setLocked(false);
+                console.log(`Thread ${originalThreadId} has been unlocked successfully`);
+              } catch (unlockError) {
+                console.error(`Error unlocking thread ${originalThreadId}:`, unlockError);
+                // Try to continue even if unlock fails
+              }
+              
+              // Add a small delay to ensure Discord processes the unlock before sending the message
+              await new Promise(resolve => setTimeout(resolve, 500));
+              
+              // Now send the notification (after unlocking)
+              const notificationMessage = await originalThread.send({ 
+                embeds: [threadNotificationEmbed] 
+              });
+              
+              console.log(`Successfully sent reopen notification inside thread: ${originalThreadId}, message ID: ${notificationMessage.id}`);
+            } catch (notificationError) {
+              console.error(`Failed to send notification to thread ${originalThreadId}:`, notificationError);
+              
+              // If notification failed, try one more time after ensuring thread is unlocked
+              try {
+                await originalThread.setLocked(false);
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Longer delay on retry
+                
+                const threadNotificationEmbed = new EmbedBuilder()
+                  .setColor(0x3498DB)
+                  .setTitle(`🔄 Thread Reopened`)
+                  .setDescription(`This thread has been reopened by ${interaction.user.toString()}.`)
+                  .setFooter({ 
+                    text: `Thread ID: ${originalThread.id.slice(-6)}` 
+                  });
+                
+                await originalThread.send({ 
+                  embeds: [threadNotificationEmbed] 
+                });
+                console.log(`Retry: Successfully sent reopen notification inside thread: ${originalThreadId}`);
+              } catch (retryError) {
+                console.error(`Retry also failed for thread ${originalThreadId}:`, retryError);
+              }
             }
+          } else {
+            console.log(`Thread ${originalThreadId} not found or is not a thread`);
+          }
+        } catch (error) {
+          console.error('Error processing thread reopen:', error);
+        }
+      }
+    } catch (err) {
+      console.error('Error cleaning up archived content:', err);
+    }
+    
+    // 4️⃣ Send a reopen notification to the parent channel of the thread
+    if (originalThreadId) {
+      try {
+        const originalThread = await interaction.guild.channels.fetch(originalThreadId).catch(() => null);
+        
+        if (originalThread && originalThread.isThread()) {
+          // Get the parent channel of the thread
+          const parentChannel = originalThread.parent;
+          
+          if (parentChannel) {
+            const reopenEmbed = new EmbedBuilder()
+              .setColor(0x3498DB) // Blue color
+              .setTitle(`🔄 Task Reopened: ${taskTitle}`)
+              .setDescription(`This task has been reopened by ${interaction.user.toString()}.`)
+              .addFields({
+                name: 'Thread',
+                value: `<#${originalThread.id}>`
+              })
+              .setTimestamp()
+              .setFooter({ 
+                text: `Task ID: ${originalThread.id.slice(-6)} • Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` 
+              });
+              
+            // Create action row with buttons
+            const actionRow = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setLabel('🔗 Go to Thread')
+                .setStyle(ButtonStyle.Link)
+                .setURL(`https://discord.com/channels/${interaction.guild.id}/${originalThread.id}`),
+              new ButtonBuilder()
+                .setLabel('✅ Close Task')
+                .setCustomId(`close_task_${originalThread.id}`)
+                .setStyle(ButtonStyle.Danger)
+            );
+              
+            await parentChannel.send({ 
+              embeds: [reopenEmbed],
+              components: [actionRow]
+            });
+            console.log(`Sent reopen notification to parent channel: ${parentChannel.id}`);
+          } else {
+            console.log(`Could not find parent channel for thread: ${originalThreadId}`);
             
-            // Get the parent channel of the thread
-            const parentChannel = originalThread.parent;
-            
-            if (parentChannel) {
+            // Fallback to target channel
+            const targetChannel = await client.channels.fetch(TARGET_CHANNEL_ID);
+            if (targetChannel) {
               const reopenEmbed = new EmbedBuilder()
                 .setColor(0x3498DB) // Blue color
                 .setTitle(`🔄 Task Reopened: ${taskTitle}`)
@@ -741,181 +866,146 @@ client.on('interactionCreate', async (interaction) => {
                   .setStyle(ButtonStyle.Danger)
               );
                 
-              await parentChannel.send({ 
+              await targetChannel.send({ 
                 embeds: [reopenEmbed],
                 components: [actionRow]
               });
-              console.log(`Sent reopen notification to parent channel: ${parentChannel.id}`);
-            } else {
-              console.log(`Could not find parent channel for thread: ${originalThreadId}`);
-              
-              // Fallback to target channel
-              const targetChannel = await client.channels.fetch(TARGET_CHANNEL_ID);
-              if (targetChannel) {
-                const reopenEmbed = new EmbedBuilder()
-                  .setColor(0x3498DB) // Blue color
-                  .setTitle(`🔄 Task Reopened: ${taskTitle}`)
-                  .setDescription(`This task has been reopened by ${interaction.user.toString()}.`)
-                  .addFields({
-                    name: 'Thread',
-                    value: `<#${originalThread.id}>`
-                  })
-                  .setTimestamp()
-                  .setFooter({ 
-                    text: `Task ID: ${originalThread.id.slice(-6)} • Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` 
-                  });
-                  
-                // Create action row with buttons
-                const actionRow = new ActionRowBuilder().addComponents(
-                  new ButtonBuilder()
-                    .setLabel('🔗 Go to Thread')
-                    .setStyle(ButtonStyle.Link)
-                    .setURL(`https://discord.com/channels/${interaction.guild.id}/${originalThread.id}`),
-                  new ButtonBuilder()
-                    .setLabel('✅ Close Task')
-                    .setCustomId(`close_task_${originalThread.id}`)
-                    .setStyle(ButtonStyle.Danger)
-                );
-                  
-                await targetChannel.send({ 
-                  embeds: [reopenEmbed],
-                  components: [actionRow]
+              console.log(`Sent reopen notification to target channel as fallback: ${TARGET_CHANNEL_ID}`);
+            }
+          }
+        } else {
+          console.log(`Could not find original thread: ${originalThreadId}`);
+          
+          // Try to send to target channel if thread not found
+          try {
+            const targetChannel = await client.channels.fetch(TARGET_CHANNEL_ID);
+            if (targetChannel) {
+              const reopenEmbed = new EmbedBuilder()
+                .setColor(0x3498DB) // Blue color
+                .setTitle(`🔄 Task Reopened: ${taskTitle}`)
+                .setDescription(`This task has been reopened by ${interaction.user.toString()}.`)
+                .addFields({
+                  name: 'Note',
+                  value: 'The original thread could not be found. This notification is sent to the main channel instead.'
+                })
+                .setTimestamp()
+                .setFooter({ 
+                  text: `Task ID: ${originalThreadId ? originalThreadId.slice(-6) : 'Unknown'} • Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` 
                 });
-                console.log(`Sent reopen notification to target channel as fallback: ${TARGET_CHANNEL_ID}`);
-              }
+                
+              await targetChannel.send({ embeds: [reopenEmbed] });
+              console.log(`Sent reopen notification to target channel instead: ${TARGET_CHANNEL_ID}`);
             }
-          } else {
-            console.log(`Could not find original thread: ${originalThreadId}`);
+          } catch (err) {
+            console.error('Could not send reopen notification to target channel:', err);
+          }
+        }
+      } catch (err) {
+        console.error('Error sending reopen notification:', err);
+      }
+    } else {
+      console.log('Could not determine original thread ID for reopen notification');
+      
+      // Try to send to the target channel as a fallback
+      try {
+        const targetChannel = await client.channels.fetch(TARGET_CHANNEL_ID);
+        if (targetChannel) {
+          const reopenEmbed = new EmbedBuilder()
+            .setColor(0x3498DB) // Blue color
+            .setTitle(`🔄 Task Reopened: ${taskTitle}`)
+            .setDescription(`This task has been reopened by ${interaction.user.toString()}.`)
+            .addFields({
+              name: 'Note',
+              value: 'The original thread could not be determined. This notification is sent to the main channel instead.'
+            })
+            .setTimestamp()
+            .setFooter({ 
+              text: `Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` 
+            });
             
-            // Try to send to target channel if thread not found
-            try {
-              const targetChannel = await client.channels.fetch(TARGET_CHANNEL_ID);
-              if (targetChannel) {
-                const reopenEmbed = new EmbedBuilder()
-                  .setColor(0x3498DB) // Blue color
-                  .setTitle(`🔄 Task Reopened: ${taskTitle}`)
-                  .setDescription(`This task has been reopened by ${interaction.user.toString()}.`)
-                  .addFields({
-                    name: 'Note',
-                    value: 'The original thread could not be found. This notification is sent to the main channel instead.'
-                  })
-                  .setTimestamp()
-                  .setFooter({ 
-                    text: `Task ID: ${originalThreadId ? originalThreadId.slice(-6) : 'Unknown'} • Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` 
-                  });
-                  
-                await targetChannel.send({ embeds: [reopenEmbed] });
-                console.log(`Sent reopen notification to target channel instead: ${TARGET_CHANNEL_ID}`);
-              }
-            } catch (err) {
-              console.error('Could not send reopen notification to target channel:', err);
-            }
-          }
-        } catch (err) {
-          console.error('Error sending reopen notification:', err);
+          await targetChannel.send({ embeds: [reopenEmbed] });
+          console.log(`Sent reopen notification to target channel as fallback: ${TARGET_CHANNEL_ID}`);
         }
-      } else {
-        console.log('Could not determine original thread ID for reopen notification');
-        
-        // Try to send to the target channel as a fallback
-        try {
-          const targetChannel = await client.channels.fetch(TARGET_CHANNEL_ID);
-          if (targetChannel) {
-            const reopenEmbed = new EmbedBuilder()
-              .setColor(0x3498DB) // Blue color
-              .setTitle(`🔄 Task Reopened: ${taskTitle}`)
-              .setDescription(`This task has been reopened by ${interaction.user.toString()}.`)
-              .addFields({
-                name: 'Note',
-                value: 'The original thread could not be determined. This notification is sent to the main channel instead.'
-              })
-              .setTimestamp()
-              .setFooter({ 
-                text: `Today at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}` 
-              });
-              
-            await targetChannel.send({ embeds: [reopenEmbed] });
-            console.log(`Sent reopen notification to target channel as fallback: ${TARGET_CHANNEL_ID}`);
-          }
-        } catch (err) {
-          console.error('Could not send reopen notification to target channel:', err);
-        }
+      } catch (err) {
+        console.error('Could not send reopen notification to target channel:', err);
       }
+    }
 
-      // 5️⃣ Provide feedback to the user
-      await interaction.editReply({
-        content: 'Thread reopened and all archive messages have been removed. A notification has been sent to the parent channel.',
-        ephemeral: true
-      });
-    
-    } catch (error) {
-      console.error('Error handling reopen button:', error);
-      if (interaction.deferred) {
-        await interaction.editReply({
-          content: 'An error occurred while reopening the thread.',
-          ephemeral: true
-        }).catch(() => null);
-      }
-    }
-  }
+    // 5️⃣ Provide feedback to the user
+    await interaction.editReply({
+      content: 'Thread reopened and all archive messages have been removed. A notification has been sent to the parent channel and inside the thread.',
+      ephemeral: true
+    });
   
-  // Handle close task button clicks
-  else if (interaction.isButton() && interaction.customId.startsWith('close_task_')) {
-    try {
-      // Acknowledge the interaction immediately
-      await interaction.deferReply({ ephemeral: true });
-      
-      // Parse out the thread ID from the button custom ID
-      const threadId = interaction.customId.split('_')[2];
-      console.log(`Processing close task request for thread: ${threadId}`);
-      
-      // Find the thread
-      const thread = await interaction.guild.channels.fetch(threadId).catch(() => null);
-      
-      if (!thread || !thread.isThread()) {
-        await interaction.editReply({
-          content: 'Could not find the thread to close. It may have been deleted already.',
-          ephemeral: true
-        });
-        return;
-      }
-      
-      // Get the first message in the thread (for recreateThread function)
-      const messages = await thread.messages.fetch({ limit: 1 });
-      let firstMessage = messages.first();
-      
-      if (!firstMessage) {
-        await interaction.editReply({
-          content: 'Could not find any messages in the thread to mark as completed.',
-          ephemeral: true
-        });
-        return;
-      }
-      
-      // Delete the notification message with buttons
-      await interaction.message.delete().catch(error => {
-        console.error('Failed to delete notification message:', error);
-      });
-      
-      // Use the existing recreateThread function to mark it as completed
-      await recreateThread(firstMessage, interaction.user);
-      
-      // Provide feedback to the user
+  } catch (error) {
+    console.error('Error handling reopen button:', error);
+    if (interaction.deferred) {
       await interaction.editReply({
-        content: 'The task has been marked as completed and archived.',
+        content: 'An error occurred while reopening the thread.',
         ephemeral: true
-      });
-      
-    } catch (error) {
-      console.error('Error handling close task button:', error);
-      if (interaction.deferred) {
-        await interaction.editReply({
-          content: 'An error occurred while closing the task.',
-          ephemeral: true
-        }).catch(() => null);
-      }
+      }).catch(() => null);
     }
   }
+}
+  
+// Handle close task button clicks
+else if (interaction.isButton() && interaction.customId.startsWith('close_task_')) {
+  try {
+    // Acknowledge the interaction immediately
+    await interaction.deferReply({ ephemeral: true });
+    
+    // Parse out the thread ID from the button custom ID
+    const threadId = interaction.customId.split('_')[2];
+    console.log(`Processing close task request for thread: ${threadId}`);
+    
+    // Find the thread
+    const thread = await interaction.guild.channels.fetch(threadId).catch(() => null);
+    
+    if (!thread || !thread.isThread()) {
+      await interaction.editReply({
+        content: 'Could not find the thread to close. It may have been deleted already.',
+        ephemeral: true
+      });
+      return;
+    }
+    
+    // Get the first message in the thread (for recreateThread function)
+    const messages = await thread.messages.fetch({ limit: 1 });
+    let firstMessage = messages.first();
+    
+    if (!firstMessage) {
+      await interaction.editReply({
+        content: 'Could not find any messages in the thread to mark as completed.',
+        ephemeral: true
+      });
+      return;
+    }
+    
+    // Delete the notification message with buttons
+    await interaction.message.delete().catch(error => {
+      console.error('Failed to delete notification message:', error);
+    });
+    
+    // Use the existing recreateThread function to mark it as completed
+    // The notification will be sent inside this function
+    await recreateThread(firstMessage, interaction.user);
+    
+    // Provide feedback to the user
+    await interaction.editReply({
+      content: 'The task has been marked as completed and archived.',
+      ephemeral: true
+    });
+    
+  } catch (error) {
+    console.error('Error handling close task button:', error);
+    if (interaction.deferred) {
+      await interaction.editReply({
+        content: 'An error occurred while closing the task.',
+        ephemeral: true
+      }).catch(() => null);
+    }
+  }
+}
 });
 
 client.login(process.env.DISCORD_TOKEN);

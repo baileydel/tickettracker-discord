@@ -154,31 +154,12 @@ async function recreateThread(message, user) {
 
     await originalThread.fetch();
     
-    // Add a completion message in the original thread
-    const threadCompletionEmbed = new EmbedBuilder()
-      .setColor(0x22B14C) // Green color
-      .setTitle('✅ Task Marked as Completed')
-      .setDescription(`This task has been marked as completed by ${user.toString()}.`)
-      .setTimestamp()
-      .setFooter({ text: `The thread will be locked for further messages.` });
-    
-    await originalThread.send({ embeds: [threadCompletionEmbed] });
-    
     // Lock the thread to prevent further messages
     try {
-      // Update the thread title to add a checkmark
-      const originalTitle = originalThread.name;
-      // Only add checkmark if it doesn't already have one
-      if (!originalTitle.startsWith('✅')) {
-        await originalThread.setName(`✅ ${originalTitle}`);
-        console.log(`Updated thread title to: ✅ ${originalTitle}`);
-      }
-      
-      // Lock the thread
       await originalThread.setLocked(true);
       console.log(`Thread ${originalThread.id} has been locked`);
     } catch (error) {
-      console.error('Error updating thread title or locking thread:', error);
+      console.error('Error locking thread:', error);
     }
 
     const threadName = originalThread.name || "Completed Thread";
@@ -192,7 +173,7 @@ async function recreateThread(message, user) {
       .addFields(
         {
           name: '📊 Thread Stats',
-          value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}\n• **Topics:** ${extractKeywords(threadName)}`
+          value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}}`
         },
         {
           name: 'Original Thread',
@@ -231,7 +212,7 @@ async function recreateThread(message, user) {
     archiveEmbeds.setFields(
       {
         name: '📊 Thread Stats',
-        value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}\n• **Topics:** ${extractKeywords(threadName)}`
+        value: `• **Duration:** ${await getThreadDuration(originalThread)}\n• **Messages:** ${await getMessageCount(originalThread)}\n• **Participants:** ${await getParticipantCount(originalThread)}`
       },
       {
         name: 'Original Thread',
@@ -725,35 +706,10 @@ client.on('interactionCreate', async (interaction) => {
           if (originalThread && originalThread.isThread()) {
             // Unlock the thread
             try {
-              // Update thread title to add reopen symbol
-              const currentTitle = originalThread.name;
-              // Remove the checkmark if it exists and add the reopen symbol
-              let newTitle = currentTitle;
-              if (currentTitle.startsWith('✅ ')) {
-                newTitle = currentTitle.substring(2);
-              }
-              
-              // Only add reopen symbol if it doesn't already have one
-              if (!newTitle.startsWith('🔄')) {
-                await originalThread.setName(`🔄 ${newTitle}`);
-                console.log(`Updated thread title to: 🔄 ${newTitle}`);
-              }
-              
-              // Unlock the thread
               await originalThread.setLocked(false);
               console.log(`Thread ${originalThreadId} has been unlocked`);
-              
-              // Send a reopen notification in the original thread
-              const threadReopenEmbed = new EmbedBuilder()
-                .setColor(0x3498DB) // Blue color
-                .setTitle('🔄 Task Reopened')
-                .setDescription(`This task has been reopened by ${interaction.user.toString()}.`)
-                .setTimestamp()
-                .setFooter({ text: `The thread has been unlocked for further messages.` });
-              
-              await originalThread.send({ embeds: [threadReopenEmbed] });
             } catch (error) {
-              console.error('Error updating thread title, unlocking thread, or sending notification:', error);
+              console.error('Error unlocking thread:', error);
             }
             
             // Get the parent channel of the thread

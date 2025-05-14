@@ -399,16 +399,6 @@ async function getParticipantCount(thread) {
   }
 }
 
-function extractKeywords(threadName) {
-  if (!threadName) return "N/A";
-  
-  const keywords = threadName
-    .split(/[\s,.-_]+/)
-    .filter(word => word.length > 3)
-    .slice(0, 5);
-    
-  return keywords.length > 0 ? keywords.join(', ') : threadName;
-}
 
 // REACTION HANDLER
 client.on('messageReactionAdd', async (reaction, user) => {

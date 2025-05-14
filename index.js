@@ -792,7 +792,7 @@ else if (interaction.isButton() && interaction.customId.startsWith('reopen_')) {
                 .setStyle(ButtonStyle.Link)
                 .setURL(`https://discord.com/channels/${interaction.guild.id}/${originalThread.id}`),
               new ButtonBuilder()
-                .setLabel('✅ Close Task')
+                .setLabel('Close Task')
                 .setCustomId(`close_task_${originalThread.id}`)
                 .setStyle(ButtonStyle.Danger)
             );
@@ -828,7 +828,7 @@ else if (interaction.isButton() && interaction.customId.startsWith('reopen_')) {
                   .setStyle(ButtonStyle.Link)
                   .setURL(`https://discord.com/channels/${interaction.guild.id}/${originalThread.id}`),
                 new ButtonBuilder()
-                  .setLabel('✅ Close Task')
+                  .setLabel('Close Task')
                   .setCustomId(`close_task_${originalThread.id}`)
                   .setStyle(ButtonStyle.Danger)
               );

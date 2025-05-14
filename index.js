@@ -1,26 +1,3 @@
-// Helper function to split long text into chunks
-function splitTextIntoChunks(text, maxLength) {
-  const chunks = [];
-  let currentChunk = '';
-
-  const lines = text.split('\n');
-  for (const line of lines) {
-    if (currentChunk.length + line.length + 1 > maxLength) {
-      chunks.push(currentChunk);
-      currentChunk = line + '\n';
-    } else {
-      currentChunk += line + '\n';
-    }
-  }
-
-  if (currentChunk) {
-    chunks.push(currentChunk);
-  }
-
-  return chunks;
-}
-
-// Discord Bot for Thread Recreation on Checkmark
 const { Client, GatewayIntentBits, Partials, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 require('dotenv').config();
 
